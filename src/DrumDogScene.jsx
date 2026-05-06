@@ -7,9 +7,42 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import * as THREE from "three";
 import { playDrumHit } from "./drumAudio.js";
+
+function HitSpark({ at, color = "#ffd166", startAt, life = 0.26, seed = 0 }) {
+  const root = useRef(null);
+
+  useFrame(({ clock }) => {
+    const g = root.current;
+    if (!g) return;
+    const t = clock.getElapsedTime() - startAt;
+    const p = THREE.MathUtils.clamp(t / Math.max(0.001, life), 0, 1);
+    const ease = 1 - (1 - p) * (1 - p);
+    const sc = 0.12 + ease * 0.75;
+    g.scale.setScalar(sc);
+    g.rotation.z = seed + ease * 1.25;
+    g.position.set(at[0], at[1], at[2]);
+    const m = g.children?.[0]?.material;
+    if (m) m.opacity = 0.75 * (1 - p);
+  });
+
+  return (
+    <group ref={root} position={at}>
+      <mesh>
+        <ringGeometry args={[0.16, 0.26, 28]} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={0.75}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
+  );
+}
 
 function ResponsiveCameraRig() {
   const { camera, size } = useThree();
@@ -388,48 +421,95 @@ function TapButton3D({ position, color, onTap, scale: btnScale = 1 }) {
   );
 }
 
-function DrumStage({ onDrumHit, flatTapButtons, onControlsReady }) {
+function DrumStage({ onDrumHit, flatTapButtons, onControlsReady, onLaneInput }) {
   const leftStrike = useRef(1);
   const rightStrike = useRef(1);
   const drumPulse = useRef(1);
   const layout = useCornerTapLayout();
+  const [sparks, setSparks] = useState([]);
+
+  // Clean up expired sparks
+  useFrame(({ clock }) => {
+    const now = clock.getElapsedTime();
+    setSparks((prev) => prev.filter((s) => now - s.startAt <= s.life));
+  });
+
+  const spawnSpark = useCallback((side) => {
+    // Approximate hit point near drum head; slight side offset.
+    const sx = side === "left" ? 1 : -1;
+    setSparks((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random()}`,
+        at: [sx * 0.12, -0.52, 1.05],
+        startAt: performance.now() / 1000,
+        life: 0.26,
+        color: side === "left" ? "#a29bfe" : "#fd79a8",
+        seed: Math.random() * Math.PI * 2,
+      },
+    ]);
+  }, []);
 
   const hitLeft = useCallback(() => {
     playDrumHit();
     leftStrike.current = 0;
     drumPulse.current = 0;
+    spawnSpark("left");
     onDrumHit?.();
-  }, [onDrumHit]);
+  }, [onDrumHit, spawnSpark]);
 
   const hitRight = useCallback(() => {
     playDrumHit();
     rightStrike.current = 0;
     drumPulse.current = 0;
+    spawnSpark("right");
     onDrumHit?.();
-  }, [onDrumHit]);
+  }, [onDrumHit, spawnSpark]);
+
+  const triggerLeftControl = useCallback(() => {
+    hitRight();
+    onLaneInput?.("left");
+  }, [hitRight, onLaneInput]);
+
+  const triggerRightControl = useCallback(() => {
+    hitLeft();
+    onLaneInput?.("right");
+  }, [hitLeft, onLaneInput]);
 
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.repeat) return;
-      if (e.code === "ArrowLeft") {
+      // Keyboard controls (desktop): A / L
+      // NOTE: Don't block when focus is on the canvas/root; only skip when actively typing.
+      const el = e.target;
+      const tag = el && el.tagName ? String(el.tagName).toLowerCase() : "";
+      const isTypingTarget = tag === "input" || tag === "textarea" || (el && el.isContentEditable);
+      if (isTypingTarget) return;
+
+      const code = e.code || "";
+      const key = (e.key || "").toLowerCase();
+      const isLeft = code === "KeyA" || key === "a";
+      const isRight = code === "KeyL" || key === "l";
+
+      if (isLeft) {
         e.preventDefault();
-        hitRight();
-      } else if (e.code === "ArrowRight") {
+        triggerLeftControl();
+      } else if (isRight) {
         e.preventDefault();
-        hitLeft();
+        triggerRightControl();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [hitLeft, hitRight]);
+  }, [triggerLeftControl, triggerRightControl]);
 
   useEffect(() => {
     onControlsReady?.({
-      leftTap: hitRight,
-      rightTap: hitLeft,
+      leftTap: triggerLeftControl,
+      rightTap: triggerRightControl,
     });
     return () => onControlsReady?.(null);
-  }, [hitLeft, hitRight, onControlsReady]);
+  }, [triggerLeftControl, triggerRightControl, onControlsReady]);
 
   return (
     <>
@@ -441,6 +521,16 @@ function DrumStage({ onDrumHit, flatTapButtons, onControlsReady }) {
 
         <LowPolyCorgi leftStrike={leftStrike} rightStrike={rightStrike} />
         <Drum pulse={drumPulse} />
+        {sparks.map((s) => (
+          <HitSpark
+            key={s.id}
+            at={s.at}
+            color={s.color}
+            startAt={s.startAt}
+            life={s.life}
+            seed={s.seed}
+          />
+        ))}
       </SceneScale>
 
       {!flatTapButtons ? (
@@ -448,13 +538,13 @@ function DrumStage({ onDrumHit, flatTapButtons, onControlsReady }) {
           <TapButton3D
             position={layout.left}
             color={BTN_A}
-            onTap={hitRight}
+            onTap={triggerLeftControl}
             scale={layout.btnScale}
           />
           <TapButton3D
             position={layout.right}
             color={BTN_B}
-            onTap={hitLeft}
+            onTap={triggerRightControl}
             scale={layout.btnScale}
           />
         </>
@@ -467,6 +557,7 @@ export function DrumDogScene({
   onDrumHit,
   flatTapButtons = false,
   onControlsReady,
+  onLaneInput,
 }) {
   return (
     <>
@@ -475,6 +566,7 @@ export function DrumDogScene({
         onDrumHit={onDrumHit}
         flatTapButtons={flatTapButtons}
         onControlsReady={onControlsReady}
+        onLaneInput={onLaneInput}
       />
     </>
   );
